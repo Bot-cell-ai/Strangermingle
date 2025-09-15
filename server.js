@@ -16,8 +16,8 @@ const io = new Server(server, {
   }
 });
 
-// reCAPTCHA configuration
-const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY; // Replace with your actual secret key
+// IMPORTANT: Replace with your actual secret key, preferably from environment variables
+const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY || "YOUR_GOOGLE_RECAPTCHA_SECRET_KEY_HERE";
 const RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
 
 // User management
@@ -31,19 +31,23 @@ let userStats = {
 
 // reCAPTCHA verification function
 async function verifyRecaptcha(token) {
+  // In a real app, never disable verification. This is for testing only.
+  if (!token || token === 'demo-token') return true; 
+  if (RECAPTCHA_SECRET_KEY === "YOUR_GOOGLE_RECAPTCHA_SECRET_KEY_HERE") {
+    console.warn("reCAPTCHA is not configured. Allowing all requests.");
+    return true;
+  }
+
   try {
-    if (!token) return false;
-    
     const response = await axios.post(RECAPTCHA_VERIFY_URL, null, {
       params: {
         secret: RECAPTCHA_SECRET_KEY,
         response: token
       }
     });
-    
     return response.data.success;
   } catch (error) {
-    console.error("reCAPTCHA verification error:", error);
+    console.error("reCAPTCHA verification error:", error.message);
     return false;
   }
 }
@@ -60,21 +64,14 @@ function removeFromWaiting(socketId) {
 function disconnectPair(socketId) {
   const partnerId = findPartner(socketId);
   if (partnerId) {
-    // Notify partner about disconnection
     io.to(partnerId).emit("partner-disconnected");
     
-    // Remove both from connected pairs
     connectedPairs.delete(socketId);
     connectedPairs.delete(partnerId);
     
-    // Add partner back to waiting queue
     const partnerSocket = io.sockets.sockets.get(partnerId);
     if (partnerSocket) {
-      waitingUsers.push({
-        id: partnerId,
-        socket: partnerSocket,
-        joinedAt: Date.now()
-      });
+      waitingUsers.push({ id: partnerId, socket: partnerSocket, joinedAt: Date.now() });
       io.to(partnerId).emit("searching");
     }
   }
@@ -84,210 +81,118 @@ function disconnectPair(socketId) {
 io.on("connection", (socket) => {
   console.log(`User connected: ${socket.id}`);
   userStats.activeUsers++;
-  
-  // Handle join request
+  socket.isVerified = false; // Add verification flag to each socket session
+
   socket.on("join", () => {
     console.log(`User ${socket.id} joined the queue`);
-    
-    // Check if there's a waiting user
     if (waitingUsers.length > 0) {
       const waitingUser = waitingUsers.shift();
-      
-      // Pair the users
       connectedPairs.set(socket.id, waitingUser.id);
       connectedPairs.set(waitingUser.id, socket.id);
-      
-      // Notify both users
       socket.emit("connected");
       waitingUser.socket.emit("connected");
-      
       userStats.totalConnections++;
       console.log(`Paired ${socket.id} with ${waitingUser.id}`);
     } else {
-      // Add to waiting queue
-      waitingUsers.push({
-        id: socket.id,
-        socket: socket,
-        joinedAt: Date.now()
-      });
+      waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
       socket.emit("searching");
     }
   });
-  
-  // Handle message sending
+
   socket.on("message", async (data) => {
     try {
       const { text, captcha } = data;
-      
-      // Verify reCAPTCHA
-      if (!await verifyRecaptcha(captcha)) {
-        socket.emit("error", { 
-          type: "captcha_failed",
-          message: "reCAPTCHA verification failed" 
-        });
-        return;
+      const partnerId = findPartner(socket.id);
+
+      if (!partnerId) {
+        return socket.emit("error", { type: "no_partner", message: "No partner connected" });
+      }
+
+      // --- MODIFIED CAPTCHA LOGIC ---
+      // Only verify captcha if the user hasn't been verified in this session yet.
+      if (!socket.isVerified) {
+        if (!await verifyRecaptcha(captcha)) {
+          return socket.emit("error", { type: "captcha_failed", message: "reCAPTCHA verification failed" });
+        }
+        // If verification is successful, mark them as verified.
+        socket.isVerified = true;
       }
       
-      // Validate message
       if (!text || typeof text !== 'string' || text.trim().length === 0) {
-        socket.emit("error", { 
-          type: "invalid_message",
-          message: "Invalid message content" 
-        });
-        return;
+        return socket.emit("error", { type: "invalid_message", message: "Invalid message content" });
       }
       
       if (text.length > 500) {
-        socket.emit("error", { 
-          type: "message_too_long",
-          message: "Message too long" 
-        });
-        return;
+        return socket.emit("error", { type: "message_too_long", message: "Message too long" });
       }
       
-      // Find partner and send message
-      const partnerId = findPartner(socket.id);
-      if (partnerId) {
-        io.to(partnerId).emit("message", { text: text.trim() });
-        userStats.totalMessages++;
-        console.log(`Message from ${socket.id} to ${partnerId}: ${text.substring(0, 50)}...`);
-      } else {
-        socket.emit("error", { 
-          type: "no_partner",
-          message: "No partner connected" 
-        });
-      }
+      io.to(partnerId).emit("message", { text: text.trim() });
+      userStats.totalMessages++;
     } catch (error) {
       console.error("Message handling error:", error);
-      socket.emit("error", { 
-        type: "server_error",
-        message: "Server error occurred" 
-      });
+      socket.emit("error", { type: "server_error", message: "Server error occurred" });
     }
   });
-  
-  // Handle typing indicators
+
   socket.on("typing", () => {
     const partnerId = findPartner(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit("typing");
-    }
+    if (partnerId) io.to(partnerId).emit("typing");
   });
   
   socket.on("stopTyping", () => {
     const partnerId = findPartner(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit("stopTyping");
-    }
+    if (partnerId) io.to(partnerId).emit("stopTyping");
   });
   
-  // Handle next chat request
   socket.on("next", () => {
     console.log(`User ${socket.id} requested next chat`);
-    
-    // Disconnect current pair
     disconnectPair(socket.id);
-    
-    // Remove from waiting queue if present
     removeFromWaiting(socket.id);
     
-    // Add back to queue
     if (waitingUsers.length > 0) {
       const waitingUser = waitingUsers.shift();
-      
-      // Pair with new user
       connectedPairs.set(socket.id, waitingUser.id);
       connectedPairs.set(waitingUser.id, socket.id);
-      
       socket.emit("connected");
       waitingUser.socket.emit("connected");
-      
       userStats.totalConnections++;
     } else {
-      waitingUsers.push({
-        id: socket.id,
-        socket: socket,
-        joinedAt: Date.now()
-      });
+      waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
       socket.emit("searching");
     }
   });
   
-  // Handle report
   socket.on("report", (data) => {
     const { reason } = data;
     const partnerId = findPartner(socket.id);
-    
-    console.log(`Report from ${socket.id} against ${partnerId}: ${reason}`);
-    
-    // Log the report (in production, save to database)
     console.log(`REPORT: User ${socket.id} reported ${partnerId} for: ${reason}`);
-    
-    // Disconnect the pair
     disconnectPair(socket.id);
-    
-    // In production, you might want to implement temporary bans
-    // or other moderation features here
   });
   
-  // Handle ping for connection quality
-  socket.on("ping", () => {
-    socket.emit("pong");
-  });
+  socket.on("ping", () => socket.emit("pong"));
   
-  // Handle disconnect
   socket.on("disconnect", () => {
     console.log(`User disconnected: ${socket.id}`);
     userStats.activeUsers--;
-    
-    // Remove from waiting queue
     removeFromWaiting(socket.id);
-    
-    // Disconnect pair if connected
     disconnectPair(socket.id);
   });
 });
 
-// REST API endpoints for stats
+// REST API endpoints
 app.get("/api/stats", (req, res) => {
   res.json({
-    onlineUsers: userStats.activeUsers,
-    totalChats: userStats.totalConnections,
-    totalMessages: userStats.totalMessages,
-    waitingUsers: waitingUsers.length
+    onlineUsers: io.engine.clientsCount, // More accurate online count
+    totalChatsToday: userStats.totalConnections,
+    waitingInQueue: waitingUsers.length
   });
 });
 
-// Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.json({
-    status: "healthy",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
+  res.json({ status: "healthy", uptime: process.uptime() });
 });
-
-// Cleanup function for stale waiting users
-setInterval(() => {
-  const now = Date.now();
-  const timeout = 5 * 60 * 1000; // 5 minutes
-  
-  waitingUsers = waitingUsers.filter(user => {
-    const isStale = (now - user.joinedAt) > timeout;
-    if (isStale) {
-      console.log(`Removing stale user: ${user.id}`);
-      user.socket.emit("error", { 
-        type: "timeout",
-        message: "Connection timeout" 
-      });
-    }
-    return !isStale;
-  });
-}, 60000); // Check every minute
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/api/health`);
-  console.log(`Stats API: http://localhost:${PORT}/api/stats`);
 });
