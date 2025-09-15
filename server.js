@@ -17,7 +17,7 @@ const io = new Server(server, {
 });
 
 // reCAPTCHA configuration
-const RECAPTCHA_SECRET_KEY = "6LcZaskrAAAAAHnl7z0vz6QZmsWMicYMHbgnN8Nv"; // Replace with your actual secret key
+const RECAPTCHA_SECRET_KEY = "process.env.RECAPTCHA_SECRET_KEY"; // Replace with your actual secret key
 const RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
 
 // User management
