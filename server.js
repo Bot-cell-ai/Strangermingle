@@ -61,19 +61,22 @@ function removeFromWaiting(socketId) {
   waitingUsers = waitingUsers.filter(user => user.id !== socketId);
 }
 
+// --- MODIFIED disconnectPair() FUNCTION ---
+// Now disconnects both users and sends them to the "Start" state
+// without automatically re-queuing the partner.
 function disconnectPair(socketId) {
   const partnerId = findPartner(socketId);
   if (partnerId) {
-    io.to(partnerId).emit("partner-disconnected");
+    // Notify the partner they've been disconnected
+    io.to(partnerId).emit("partnerDisconnected");
 
+    // Remove the pair from the map
     connectedPairs.delete(socketId);
     connectedPairs.delete(partnerId);
 
-    const partnerSocket = io.sockets.sockets.get(partnerId);
-    if (partnerSocket) {
-      waitingUsers.push({ id: partnerId, socket: partnerSocket, joinedAt: Date.now() });
-      io.to(partnerId).emit("searching");
-    }
+    // The partner is NOT automatically put back into the waiting queue.
+    // Their client will receive the "partnerDisconnected" event and should
+    // handle returning to the initial state.
   }
 }
 
@@ -85,7 +88,6 @@ io.on("connection", (socket) => {
 
   socket.on("join", () => {
     console.log(`User ${socket.id} joined the queue`);
-    // --- UPDATED MATCHMAKING LOGIC ---
     if (waitingUsers.length > 0) {
       let partnerIndex = waitingUsers.findIndex(u => u.id !== socket.id);
 
@@ -99,7 +101,6 @@ io.on("connection", (socket) => {
         userStats.totalConnections++;
         console.log(`Paired ${socket.id} with ${waitingUser.id}`);
       } else {
-        // No valid partner (only self was in queue)
         waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
         socket.emit("searching");
       }
@@ -118,13 +119,10 @@ io.on("connection", (socket) => {
         return socket.emit("error", { type: "no_partner", message: "No partner connected" });
       }
 
-      // --- MODIFIED CAPTCHA LOGIC ---
-      // Only verify captcha if the user hasn't been verified in this session yet.
       if (!socket.isVerified) {
         if (!await verifyRecaptcha(captcha)) {
           return socket.emit("error", { type: "captcha_failed", message: "reCAPTCHA verification failed" });
         }
-        // If verification is successful, mark them as verified.
         socket.isVerified = true;
       }
 
@@ -154,33 +152,22 @@ io.on("connection", (socket) => {
     if (partnerId) io.to(partnerId).emit("stopTyping");
   });
 
+  // --- UPDATED "next" EVENT ---
+  // Disconnects both users and sends them back to the start state, does not auto-rematch.
   socket.on("next", () => {
     console.log(`User ${socket.id} requested next chat`);
     disconnectPair(socket.id);
     removeFromWaiting(socket.id);
+    // User is NOT automatically put back in the queue. They must "join" again.
+  });
 
-    // --- UPDATED MATCHMAKING LOGIC ---
-    if (waitingUsers.length > 0) {
-      let partnerIndex = waitingUsers.findIndex(u => u.id !== socket.id);
-
-      if (partnerIndex !== -1) {
-        const waitingUser = waitingUsers.splice(partnerIndex, 1)[0];
-        connectedPairs.set(socket.id, waitingUser.id);
-        connectedPairs.set(waitingUser.id, socket.id);
-
-        socket.emit("connected");
-        waitingUser.socket.emit("connected");
-        userStats.totalConnections++;
-        console.log(`Paired ${socket.id} with ${waitingUser.id}`);
-      } else {
-        // No valid partner (only self was in queue)
-        waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
-        socket.emit("searching");
-      }
-    } else {
-      waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
-      socket.emit("searching");
-    }
+  // --- NEW "skip" EVENT ---
+  // Behaves identically to the new "next" event.
+  socket.on("skip", () => {
+    console.log(`User ${socket.id} skipped chat`);
+    disconnectPair(socket.id);
+    removeFromWaiting(socket.id);
+    // User is NOT automatically put back in the queue. They must "join" again.
   });
 
   socket.on("report", (data) => {
