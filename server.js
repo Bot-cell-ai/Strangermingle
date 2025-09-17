@@ -32,7 +32,7 @@ let userStats = {
 // reCAPTCHA verification function
 async function verifyRecaptcha(token) {
   // In a real app, never disable verification. This is for testing only.
-  if (!token || token === 'demo-token') return true; 
+  if (!token || token === 'demo-token') return true;
   if (RECAPTCHA_SECRET_KEY === "YOUR_GOOGLE_RECAPTCHA_SECRET_KEY_HERE") {
     console.warn("reCAPTCHA is not configured. Allowing all requests.");
     return true;
@@ -65,46 +65,17 @@ function disconnectPair(socketId) {
   const partnerId = findPartner(socketId);
   if (partnerId) {
     io.to(partnerId).emit("partner-disconnected");
-    
+
     connectedPairs.delete(socketId);
     connectedPairs.delete(partnerId);
-    
+
     const partnerSocket = io.sockets.sockets.get(partnerId);
     if (partnerSocket) {
-      // Put the disconnected partner back into the queue to find a new match.
-      removeFromWaiting(partnerId); // Ensure they aren't duplicated in the queue
       waitingUsers.push({ id: partnerId, socket: partnerSocket, joinedAt: Date.now() });
       io.to(partnerId).emit("searching");
     }
   }
 }
-
-// ✅ NEW: Centralized function to find a partner and prevent self-matching
-function findAndPairUsers(socket) {
-  // Find the index of the first user in the queue who is NOT the current user.
-  const partnerIndex = waitingUsers.findIndex(user => user.id !== socket.id);
-  
-  if (partnerIndex !== -1) {
-    // A valid partner was found.
-    const partner = waitingUsers.splice(partnerIndex, 1)[0]; // Remove partner from queue
-    
-    connectedPairs.set(socket.id, partner.id);
-    connectedPairs.set(partner.id, socket.id);
-    
-    socket.emit("connected");
-    partner.socket.emit("connected");
-    
-    userStats.totalConnections++;
-    console.log(`Paired ${socket.id} with ${partner.id}`);
-  } else {
-    // No suitable partner found, add current user to the waiting queue.
-    // First, ensure they aren't already in the queue to prevent duplicates.
-    removeFromWaiting(socket.id); 
-    waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
-    socket.emit("searching");
-  }
-}
-
 
 // Socket.io connection handling
 io.on("connection", (socket) => {
@@ -112,10 +83,30 @@ io.on("connection", (socket) => {
   userStats.activeUsers++;
   socket.isVerified = false; // Add verification flag to each socket session
 
-  // ✅ UPDATED: Uses the new matchmaking function
   socket.on("join", () => {
     console.log(`User ${socket.id} joined the queue`);
-    findAndPairUsers(socket);
+    // --- UPDATED MATCHMAKING LOGIC ---
+    if (waitingUsers.length > 0) {
+      let partnerIndex = waitingUsers.findIndex(u => u.id !== socket.id);
+
+      if (partnerIndex !== -1) {
+        const waitingUser = waitingUsers.splice(partnerIndex, 1)[0];
+        connectedPairs.set(socket.id, waitingUser.id);
+        connectedPairs.set(waitingUser.id, socket.id);
+
+        socket.emit("connected");
+        waitingUser.socket.emit("connected");
+        userStats.totalConnections++;
+        console.log(`Paired ${socket.id} with ${waitingUser.id}`);
+      } else {
+        // No valid partner (only self was in queue)
+        waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
+        socket.emit("searching");
+      }
+    } else {
+      waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
+      socket.emit("searching");
+    }
   });
 
   socket.on("message", async (data) => {
@@ -136,15 +127,15 @@ io.on("connection", (socket) => {
         // If verification is successful, mark them as verified.
         socket.isVerified = true;
       }
-      
+
       if (!text || typeof text !== 'string' || text.trim().length === 0) {
         return socket.emit("error", { type: "invalid_message", message: "Invalid message content" });
       }
-      
+
       if (text.length > 500) {
         return socket.emit("error", { type: "message_too_long", message: "Message too long" });
       }
-      
+
       io.to(partnerId).emit("message", { text: text.trim() });
       userStats.totalMessages++;
     } catch (error) {
@@ -157,41 +148,54 @@ io.on("connection", (socket) => {
     const partnerId = findPartner(socket.id);
     if (partnerId) io.to(partnerId).emit("typing");
   });
-  
+
   socket.on("stopTyping", () => {
     const partnerId = findPartner(socket.id);
     if (partnerId) io.to(partnerId).emit("stopTyping");
   });
-  
-  // ✅ UPDATED: "next" (skip) logic is now cleaner and more reliable
+
   socket.on("next", () => {
     console.log(`User ${socket.id} requested next chat`);
-    // Disconnects from the current partner. The partner is put back in the queue.
     disconnectPair(socket.id);
-    // Now, find a new partner for the current user.
-    findAndPairUsers(socket);
+    removeFromWaiting(socket.id);
+
+    // --- UPDATED MATCHMAKING LOGIC ---
+    if (waitingUsers.length > 0) {
+      let partnerIndex = waitingUsers.findIndex(u => u.id !== socket.id);
+
+      if (partnerIndex !== -1) {
+        const waitingUser = waitingUsers.splice(partnerIndex, 1)[0];
+        connectedPairs.set(socket.id, waitingUser.id);
+        connectedPairs.set(waitingUser.id, socket.id);
+
+        socket.emit("connected");
+        waitingUser.socket.emit("connected");
+        userStats.totalConnections++;
+        console.log(`Paired ${socket.id} with ${waitingUser.id}`);
+      } else {
+        // No valid partner (only self was in queue)
+        waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
+        socket.emit("searching");
+      }
+    } else {
+      waitingUsers.push({ id: socket.id, socket: socket, joinedAt: Date.now() });
+      socket.emit("searching");
+    }
   });
-  
+
   socket.on("report", (data) => {
     const { reason } = data;
     const partnerId = findPartner(socket.id);
     console.log(`REPORT: User ${socket.id} reported ${partnerId} for: ${reason}`);
-    // Reporting also disconnects the pair. The partner is put back in the queue.
     disconnectPair(socket.id);
-    // The reporting user is also put back in the queue.
-    findAndPairUsers(socket);
   });
-  
+
   socket.on("ping", () => socket.emit("pong"));
-  
-  // ✅ UPDATED: Disconnect logic is clean and robust.
+
   socket.on("disconnect", () => {
     console.log(`User disconnected: ${socket.id}`);
     userStats.activeUsers--;
-    // If the user was in the waiting queue, remove them.
     removeFromWaiting(socket.id);
-    // If the user was in a chat, disconnect them from their partner.
-    // The partner will be notified and requeued automatically.
     disconnectPair(socket.id);
   });
 });
