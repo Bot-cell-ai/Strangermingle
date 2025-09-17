@@ -62,21 +62,20 @@ function removeFromWaiting(socketId) {
 }
 
 // --- MODIFIED disconnectPair() FUNCTION ---
-// Now disconnects both users and sends them to the "Start" state
-// without automatically re-queuing the partner.
+// Now notifies both users and removes them from the pair.
 function disconnectPair(socketId) {
   const partnerId = findPartner(socketId);
   if (partnerId) {
-    // Notify the partner they've been disconnected
+    // Notify both users
+    io.to(socketId).emit("partnerDisconnected");
     io.to(partnerId).emit("partnerDisconnected");
 
-    // Remove the pair from the map
+    // Remove from connected pairs
     connectedPairs.delete(socketId);
     connectedPairs.delete(partnerId);
 
-    // The partner is NOT automatically put back into the waiting queue.
-    // Their client will receive the "partnerDisconnected" event and should
-    // handle returning to the initial state.
+    // Do NOT re-add them to waitingUsers
+    // Both must press Start again manually
   }
 }
 
@@ -152,22 +151,16 @@ io.on("connection", (socket) => {
     if (partnerId) io.to(partnerId).emit("stopTyping");
   });
 
-  // --- UPDATED "next" EVENT ---
-  // Disconnects both users and sends them back to the start state, does not auto-rematch.
   socket.on("next", () => {
     console.log(`User ${socket.id} requested next chat`);
     disconnectPair(socket.id);
     removeFromWaiting(socket.id);
-    // User is NOT automatically put back in the queue. They must "join" again.
   });
 
-  // --- NEW "skip" EVENT ---
-  // Behaves identically to the new "next" event.
   socket.on("skip", () => {
     console.log(`User ${socket.id} skipped chat`);
     disconnectPair(socket.id);
     removeFromWaiting(socket.id);
-    // User is NOT automatically put back in the queue. They must "join" again.
   });
 
   socket.on("report", (data) => {
